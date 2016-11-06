@@ -89,7 +89,7 @@ class Notifier(object):
                         trakt_api.traktRequest("sync/watchlist/remove", data, method='POST')
 
                 # update library
-                trakt_api.traktRequest("sync/collection", data, method='POST')
+                # trakt_api.traktRequest("sync/collection", data, method='POST')
 
             except (traktException, traktAuthException, traktServerBusy) as e:
                 logger.log(u"Could not connect to Trakt service: {0}".format(ex(e)), logger.WARNING)
@@ -136,6 +136,7 @@ class Notifier(object):
                     logger.log(u"there's a coding problem contact developer. It's needed to be provided at lest one of the two: data_show or show_obj", logger.WARNING)
                     return False
 
+                '''
                 if data_episode is not None:
                     data['shows'][0].update(data_episode)
 
@@ -162,6 +163,7 @@ class Notifier(object):
                         season['season'][0].update(episode)
 
                     data['shows'][0].update(season)
+                '''
 
                 trakt_url = "sync/watchlist"
                 if update == "remove":

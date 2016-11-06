@@ -247,13 +247,15 @@ class TraktChecker(object):
             self.removeShowFromSickRage()
 
             if self._getShowWatchlist():
-                self.addShowToTraktWatchList()
+                # self.addShowToTraktWatchList()
                 self.updateShows()
 
+            '''
             if self._getEpisodeWatchlist():
                 self.removeEpisodeFromTraktWatchList()
                 self.addEpisodeToTraktWatchList()
                 self.updateEpisodes()
+            '''
 
     def removeEpisodeFromTraktWatchList(self):
         if sickbeard.TRAKT_SYNC_WATCHLIST and sickbeard.USE_TRAKT:
