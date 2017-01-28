@@ -146,6 +146,9 @@ class ShowQueue(generic_queue.GenericQueue):
         if lang is None:
             lang = sickbeard.INDEXER_DEFAULT_LANGUAGE
 
+        if default_status_after is None:
+            default_status_after = sickbeard.STATUS_DEFAULT_AFTER
+
         queueItemObj = QueueItemAdd(indexer, indexer_id, showDir, default_status, quality, flatten_folders, lang,
                                     subtitles, subtitles_sr_metadata, anime, scene, paused, blacklist, whitelist,
                                     default_status_after, root_dir)
@@ -210,7 +213,7 @@ class ShowQueueItem(generic_queue.QueueItem):
     """
 
     def __init__(self, action_id, show):
-        generic_queue.QueueItem.__init__(self, ShowQueueActions.names[action_id], action_id)
+        super(ShowQueueItem, self).__init__(ShowQueueActions.names[action_id], action_id)
         self.show = show
 
     def isInQueue(self):

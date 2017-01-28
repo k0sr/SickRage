@@ -209,7 +209,8 @@ class GenericProvider(object):  # pylint: disable=too-many-instance-attributes
                         parse_result.season_number is not None,
                         parse_result.episode_numbers,
                         [ep for ep in episodes if (ep.season, ep.scene_season)[ep.show.is_scene] ==
-                         parse_result.season_number and (ep.episode, ep.scene_episode)[ep.show.is_scene] in parse_result.episode_numbers]
+                        (parse_result.season_number, parse_result.scene_season)[ep.show.is_scene] and
+                        (ep.episode, ep.scene_episode)[ep.show.is_scene] in parse_result.episode_numbers]
                     ]):
 
                         logger.log(
@@ -389,6 +390,7 @@ class GenericProvider(object):  # pylint: disable=too-many-instance-attributes
 
         for show_name in allPossibleShowNames(episode.show, season=episode.scene_season):
             episode_string = show_name + ' '
+            episode_string_fallback = None
 
             if episode.show.air_by_date:
                 episode_string += str(episode.airdate).replace('-', ' ')
@@ -397,6 +399,7 @@ class GenericProvider(object):  # pylint: disable=too-many-instance-attributes
                 episode_string += ('|', ' ')[len(self.proper_strings) > 1]
                 episode_string += episode.airdate.strftime('%b')
             elif episode.show.anime:
+                episode_string_fallback = episode_string + '{0:02d}'.format(int(episode.scene_absolute_number))
                 episode_string += '{0:03d}'.format(int(episode.scene_absolute_number))
             else:
                 episode_string += sickbeard.config.naming_ep_type[2] % {
@@ -406,8 +409,12 @@ class GenericProvider(object):  # pylint: disable=too-many-instance-attributes
 
             if add_string:
                 episode_string += ' ' + add_string
+                if episode_string_fallback:
+                    episode_string_fallback += ' ' + add_string
 
             search_string['Episode'].append(episode_string.encode('utf-8').strip())
+            if episode_string_fallback:
+                search_string['Episode'].append(episode_string_fallback.encode('utf-8').strip())
 
         return [search_string]
 
@@ -417,20 +424,18 @@ class GenericProvider(object):  # pylint: disable=too-many-instance-attributes
         }
 
         for show_name in allPossibleShowNames(episode.show, season=episode.scene_season):
-            episode_string = show_name + ' '
+            season_string = show_name + ' '
 
             if episode.show.air_by_date or episode.show.sports:
-                episode_string += str(episode.airdate).split('-')[0]
+                season_string += str(episode.airdate).split('-')[0]
             elif episode.show.anime:
-                episode_string += '{0:03d}'.format(int(episode.scene_absolute_number))
+                # use string below if you really want to search on season with number
+                # season_string += 'Season ' + '{0:d}'.format(int(episode.scene_season))
+                season_string += 'Season'  # ignore season number to get all seasons in all formats
             else:
-                episode_string += 'S{0:02d}'.format(int(episode.scene_season))
+                season_string += 'S{0:02d}'.format(int(episode.scene_season))
 
-            search_string['Season'].append(episode_string.encode('utf-8').strip())
-
-            if not (episode.show.air_by_date or episode.show.sports or episode.show.anime):
-                season_string = show_name + ' Season {0:d}'.format(int(episode.scene_season))
-                search_string['Season'].append(season_string.encode('utf-8').strip())
+            search_string['Season'].append(season_string.encode('utf-8').strip())
 
         return [search_string]
 
