@@ -380,6 +380,7 @@ class TraktChecker(object):
     def updateShows(self):
         logger.log(u"SHOW_WATCHLIST::CHECK::START - Trakt Show Watchlist", logger.DEBUG)
 
+        self._getShowWatchlist()
         if not self.ShowWatchlist:
             logger.log(u"No shows found in your watchlist, aborting watchlist update", logger.DEBUG)
             return
@@ -412,6 +413,7 @@ class TraktChecker(object):
         """
         logger.log(u"SHOW_WATCHLIST::CHECK::START - Trakt Episode Watchlist", logger.DEBUG)
 
+        self._getEpisodeWatchlist()
         if not self.EpisodeWatchlist:
             logger.log(u"No episode found in your watchlist, aborting episode update", logger.DEBUG)
             return
@@ -476,7 +478,7 @@ class TraktChecker(object):
                 sickbeard.showQueueScheduler.action.addShow(int(indexer), int(indexer_id), showPath,
                                                             default_status=status,
                                                             quality=int(sickbeard.QUALITY_DEFAULT),
-                                                            flatten_folders=int(sickbeard.FLATTEN_FOLDERS_DEFAULT),
+                                                            season_folders=int(sickbeard.SEASON_FOLDERS_DEFAULT),
                                                             paused=sickbeard.TRAKT_START_PAUSED,
                                                             default_status_after=status)
             else:

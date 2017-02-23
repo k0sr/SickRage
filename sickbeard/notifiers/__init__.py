@@ -18,12 +18,13 @@
 # You should have received a copy of the GNU General Public License
 # along with SickRage. If not, see <http://www.gnu.org/licenses/>.
 
+import traceback
 import sickbeard
 
 from sickbeard.notifiers import kodi, plex, emby, nmj, nmjv2, synoindex, \
     synologynotifier, pytivo, growl, prowl, libnotify, pushover, boxcar2, \
     nma, pushalot, pushbullet, freemobile, telegram, tweet, trakt, emailnotify, \
-    slack, join, twilio_notify
+    slack, discord, join, twilio_notify
 
 # home theater / nas
 kodi_notifier = kodi.Notifier()
@@ -53,6 +54,7 @@ twilio_notifier = twilio_notify.Notifier()
 trakt_notifier = trakt.Notifier()
 email_notifier = emailnotify.Notifier()
 slack_notifier = slack.Notifier()
+discord_notifier = discord.Notifier()
 
 notifiers = [
     libnotify_notifier,  # Libnotify notifier goes first because it doesn't involve blocking on network activity.
@@ -77,6 +79,7 @@ notifiers = [
     trakt_notifier,
     email_notifier,
     slack_notifier,
+    discord_notifier,
     join_notifier,
 ]
 
@@ -99,7 +102,11 @@ def notify_snatch(ep_name):
 def notify_git_update(new_version=""):
     for n in notifiers:
         if sickbeard.NOTIFY_ON_UPDATE:
-            n.notify_git_update(new_version)
+            try:
+                n.notify_git_update(new_version)
+            except Exception:
+                sickbeard.logger.log(u"Unable to send update notification. Continuing the update process", sickbeard.logger.DEBUG)
+                sickbeard.logger.log(traceback.format_exc(), sickbeard.logger.DEBUG)
 
 
 def notify_login(ipaddress):
@@ -108,4 +115,3 @@ def notify_login(ipaddress):
             n.notify_login(ipaddress)
         else:
             print(n.__module__)
-

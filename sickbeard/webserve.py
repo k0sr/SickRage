@@ -44,6 +44,7 @@ from mako.runtime import UNDEFINED
 from mimetypes import guess_type
 
 import platform
+from threading import Lock
 
 from tornado.routes import route
 from tornado.web import RequestHandler, HTTPError, authenticated
@@ -119,7 +120,6 @@ class PageTemplate(MakoTemplate):
         self.arguments['sbHttpsPort'] = sickbeard.WEB_PORT
         self.arguments['sbHttpsEnabled'] = sickbeard.ENABLE_HTTPS
         self.arguments['sbHandleReverseProxy'] = sickbeard.HANDLE_REVERSE_PROXY
-        self.arguments['sbThemeName'] = sickbeard.THEME_NAME
         self.arguments['sbDefaultPage'] = sickbeard.DEFAULT_PAGE
         self.arguments['srLogin'] = rh.get_current_user()
         self.arguments['sbStartTime'] = rh.startTime
@@ -251,7 +251,7 @@ class WebHandler(BaseHandler):
     def get(self, _route, *args, **kwargs):
         try:
             # route -> method obj
-            _route = _route.strip('/').replace('.', '_') or 'index'
+            _route = _route.strip('/').replace('.', '_').replace('-', '_') or 'index'
             method = getattr(self, _route)
 
             results = yield self.async_call(method)
@@ -578,6 +578,7 @@ class CalendarHandler(BaseHandler):
 class UI(WebRoot):
     def __init__(self, *args, **kwargs):
         super(UI, self).__init__(*args, **kwargs)
+        self.messages_lock = Lock()
 
     @staticmethod
     def add_message():
@@ -599,13 +600,36 @@ class UI(WebRoot):
 
         return json.dumps(messages)
 
+    def set_site_message(self, message, level):
+        with self.messages_lock:
+            self.set_header('Cache-Control', 'max-age=0,no-cache,no-store')
+            if message:
+                helpers.add_site_message(message, level)
+            else:
+                if sickbeard.BRANCH and sickbeard.BRANCH != 'master' and not sickbeard.DEVELOPER and self.get_current_user():
+                    message = _('You\'re using the {branch} branch. Please use \'master\' unless specifically asked').format(branch=sickbeard.BRANCH)
+                    helpers.add_site_message(message, 'danger')
+
+            return sickbeard.SITE_MESSAGES
+
+    def get_site_messages(self):
+        with self.messages_lock:
+            self.set_header('Cache-Control', 'max-age=0,no-cache,no-store')
+            return sickbeard.SITE_MESSAGES
+
+    def dismiss_site_message(self, index):
+        with self.messages_lock:
+            self.set_header('Cache-Control', 'max-age=0,no-cache,no-store')
+            if int(index) in sickbeard.SITE_MESSAGES:
+                del sickbeard.SITE_MESSAGES[int(index)]
+            return sickbeard.SITE_MESSAGES
+
     def sickrage_background(self):
         if sickbeard.SICKRAGE_BACKGROUND_PATH and ek(os.path.isfile, sickbeard.SICKRAGE_BACKGROUND_PATH):
             self.set_header('Content-Type', guess_type(sickbeard.SICKRAGE_BACKGROUND_PATH)[0])
             with open(sickbeard.SICKRAGE_BACKGROUND_PATH, 'rb') as content:
                 return content.read()
         return None
-
 
 
 @route('/browser(/?.*)')
@@ -647,14 +671,14 @@ class Home(WebRoot):
         show_obj = Show.find(sickbeard.showList, int(show))
 
         if not show_obj:
-            return None, _("Invalid show paramaters")
+            return None, _("Invalid show parameters")
 
         if absolute:
             ep_obj = show_obj.getEpisode(absolute_number=absolute)
         elif season and episode:
             ep_obj = show_obj.getEpisode(season, episode)
         else:
-            return None, _("Invalid paramaters")
+            return None, _("Invalid parameters")
 
         if not ep_obj:
             return None, _("Episode couldn't be retrieved")
@@ -924,6 +948,14 @@ class Home(WebRoot):
             return _("Slack message successful")
         else:
             return _("Slack message failed")
+
+    @staticmethod
+    def testDiscord():
+        result = notifiers.discord_notifier.test_notify()
+        if result:
+            return _("Discord message successful")
+        else:
+            return _("Discord message failed")
 
     @staticmethod
     def testKODI(host=None, username=None, password=None):
@@ -1435,7 +1467,7 @@ class Home(WebRoot):
         return "<br>".join(out)
 
     def editShow(self, show=None, location=None, anyQualities=None, bestQualities=None,
-                 exceptions_list=None, flatten_folders=None, paused=None, directCall=False,
+                 exceptions_list=None, season_folders=None, paused=None, directCall=False,
                  air_by_date=None, sports=None, dvdorder=None, indexerLang=None,
                  subtitles=None, subtitles_sr_metadata=None, rls_ignore_words=None, rls_require_words=None,
                  anime=None, blacklist=None, whitelist=None, scene=None,
@@ -1463,7 +1495,7 @@ class Home(WebRoot):
         if try_int(quality_preset, None):
             bestQualities = []
 
-        if not (location or anyQualities or bestQualities or flatten_folders):
+        if not (location or anyQualities or bestQualities or season_folders):
             t = PageTemplate(rh=self, filename="editShow.mako")
 
             if show_obj.is_anime:
@@ -1491,7 +1523,7 @@ class Home(WebRoot):
                 return t.render(show=show, scene_exceptions=scene_exceptions, title=_('Edit Show'), header=_('Edit Show'),
                                 controller="home", action="editShow")
 
-        flatten_folders = not config.checkbox_to_value(flatten_folders)  # UI inverts this value
+        season_folders = config.checkbox_to_value(season_folders)
         dvdorder = config.checkbox_to_value(dvdorder)
         paused = config.checkbox_to_value(paused)
         air_by_date = config.checkbox_to_value(air_by_date)
@@ -1567,8 +1599,8 @@ class Home(WebRoot):
             show_obj.quality = newQuality
 
             # reversed for now
-            if bool(show_obj.flatten_folders) != bool(flatten_folders):
-                show_obj.flatten_folders = flatten_folders
+            if bool(show_obj.season_folders) != bool(season_folders):
+                show_obj.season_folders = season_folders
                 try:
                     sickbeard.showQueueScheduler.action.refreshShow(show_obj)
                 except CantRefreshShowException as e:
@@ -1592,14 +1624,15 @@ class Home(WebRoot):
             if not isinstance(location, unicode):
                 location = ek(unicode, location, 'utf-8')
 
+            location = ek(os.path.normpath, location)
+            old_location = ek(os.path.normpath, show_obj._location)
             # if we change location clear the db of episodes, change it, write to db, and rescan
-            if ek(os.path.normpath, show_obj._location) != ek(os.path.normpath, location):  # pylint: disable=protected-access
-                logger.log(ek(os.path.normpath, show_obj._location) + " != " + ek(os.path.normpath, location), logger.DEBUG)  # pylint: disable=protected-access
-                if not ek(os.path.isdir, location) and not sickbeard.CREATE_MISSING_SHOW_DIRS:
+            if old_location != location:  # pylint: disable=protected-access
+                logger.log(old_location + " != " + location, logger.DEBUG)  # pylint: disable=protected-access
+                if not (ek(os.path.isdir, location) or sickbeard.CREATE_MISSING_SHOW_DIRS or sickbeard.ADD_SHOWS_WO_DIR):
                     errors.append(_("New location <tt>{location}</tt> does not exist").format(location=location))
 
-                # don't bother if we're going to update anyway
-                elif not do_update:
+                else:
                     # change it
                     try:
                         show_obj.location = location
@@ -2338,7 +2371,7 @@ class HomePostProcess(Home):
                        is_priority=None, delete_on="0", failed="0", proc_type="manual", force_next=False, *args_, **kwargs):
 
         mode = kwargs.get('type', proc_type)
-        process_path = ss(kwargs.get('dir', proc_dir))
+        process_path = ss(kwargs.get('dir', proc_dir) or '')
         if not process_path:
             return self.redirect("/home/postprocess/")
 
@@ -2458,10 +2491,12 @@ class HomeAddShows(Home):
                 continue
 
             for cur_file in file_list:
-
                 try:
                     cur_path = ek(os.path.normpath, ek(os.path.join, root_dir, cur_file))
                     if not ek(os.path.isdir, cur_path):
+                        continue
+                    # ignore Synology folders
+                    if cur_file.lower() in ['#recycle', '@eadir']:
                         continue
                 except Exception:
                     continue
@@ -2717,10 +2752,10 @@ class HomeAddShows(Home):
             self, indexer_id, show_name, indexer="TVDB", which_series=None,
             indexer_lang=None, root_dir=None, default_status=None,
             quality_preset=None, any_qualities=None, best_qualities=None,
-            flatten_folders=None, subtitles=None, full_show_path=None,
+            season_folders=None, subtitles=None, full_show_path=None,
             other_shows=None, skip_show=None, provided_indexer=None,
             anime=None, scene=None, blacklist=None, whitelist=None,
-            default_status_after=None, default_flatten_folders=None,
+            default_status_after=None, default_season_folders=None,
             configure_show_options=None):
 
         if indexer != "TVDB":
@@ -2749,7 +2784,7 @@ class HomeAddShows(Home):
             # prepare the inputs for passing along
             scene = config.checkbox_to_value(scene)
             anime = config.checkbox_to_value(anime)
-            flatten_folders = config.checkbox_to_value(flatten_folders)
+            season_folders = config.checkbox_to_value(season_folders)
             subtitles = config.checkbox_to_value(subtitles)
 
             if whitelist:
@@ -2776,7 +2811,7 @@ class HomeAddShows(Home):
         else:
             default_status = sickbeard.STATUS_DEFAULT
             quality = sickbeard.QUALITY_DEFAULT
-            flatten_folders = sickbeard.FLATTEN_FOLDERS_DEFAULT
+            season_folders = sickbeard.SEASON_FOLDERS_DEFAULT
             subtitles = sickbeard.SUBTITLES_DEFAULT
             anime = sickbeard.ANIME_DEFAULT
             scene = sickbeard.SCENE_DEFAULT
@@ -2796,7 +2831,7 @@ class HomeAddShows(Home):
         show_dir = None
 
         # add the show
-        sickbeard.showQueueScheduler.action.addShow(1, int(indexer_id), show_dir, int(default_status), quality, flatten_folders,
+        sickbeard.showQueueScheduler.action.addShow(1, int(indexer_id), show_dir, int(default_status), quality, season_folders,
                                                     indexer_lang, subtitles, anime, scene, None, blacklist, whitelist,
                                                     int(default_status_after), root_dir=location)
 
@@ -2806,7 +2841,7 @@ class HomeAddShows(Home):
         return self.redirect('/home/')
 
     def addNewShow(self, whichSeries=None, indexerLang=None, rootDir=None, defaultStatus=None,
-                   quality_preset=None, anyQualities=None, bestQualities=None, flatten_folders=None, subtitles=None,
+                   quality_preset=None, anyQualities=None, bestQualities=None, season_folders=None, subtitles=None,
                    subtitles_sr_metadata=None, fullShowPath=None, other_shows=None, skipShow=None, providedIndexer=None,
                    anime=None, scene=None, blacklist=None, whitelist=None, defaultStatusAfter=None):
         """
@@ -2894,7 +2929,7 @@ class HomeAddShows(Home):
         # prepare the inputs for passing along
         scene = config.checkbox_to_value(scene)
         anime = config.checkbox_to_value(anime)
-        flatten_folders = config.checkbox_to_value(flatten_folders)
+        season_folders = config.checkbox_to_value(season_folders)
         subtitles = config.checkbox_to_value(subtitles)
         subtitles_sr_metadata = config.checkbox_to_value(subtitles_sr_metadata)
 
@@ -2915,7 +2950,7 @@ class HomeAddShows(Home):
 
         # add the show
         sickbeard.showQueueScheduler.action.addShow(indexer, indexer_id, show_dir, int(defaultStatus), newQuality,
-                                                    flatten_folders, indexerLang, subtitles, subtitles_sr_metadata,
+                                                    season_folders, indexerLang, subtitles, subtitles_sr_metadata,
                                                     anime, scene, None, blacklist, whitelist, int(defaultStatusAfter))
         ui.notifications.message(_('Show added'), _('Adding the specified show into {show_dir}').format(show_dir=show_dir))
 
@@ -2986,7 +3021,7 @@ class HomeAddShows(Home):
                     indexer, indexer_id, show_dir,
                     default_status=sickbeard.STATUS_DEFAULT,
                     quality=sickbeard.QUALITY_DEFAULT,
-                    flatten_folders=sickbeard.FLATTEN_FOLDERS_DEFAULT,
+                    season_folders=sickbeard.SEASON_FOLDERS_DEFAULT,
                     subtitles=sickbeard.SUBTITLES_DEFAULT,
                     anime=sickbeard.ANIME_DEFAULT,
                     scene=sickbeard.SCENE_DEFAULT,
@@ -3290,8 +3325,8 @@ class Manage(Home, WebRoot):
                 showList.append(show_obj)
                 showNames.append(show_obj.name)
 
-        flatten_folders_all_same = True
-        last_flatten_folders = None
+        season_folders_all_same = True
+        last_season_folders = None
 
         paused_all_same = True
         last_paused = None
@@ -3346,11 +3381,11 @@ class Manage(Home, WebRoot):
                 else:
                     last_anime = curShow.anime
 
-            if flatten_folders_all_same:
-                if last_flatten_folders not in (None, curShow.flatten_folders):
-                    flatten_folders_all_same = False
+            if season_folders_all_same:
+                if last_season_folders not in (None, curShow.season_folders):
+                    season_folders_all_same = False
                 else:
-                    last_flatten_folders = curShow.flatten_folders
+                    last_season_folders = curShow.season_folders
 
             if quality_all_same:
                 if last_quality not in (None, curShow.quality):
@@ -3385,7 +3420,7 @@ class Manage(Home, WebRoot):
         default_ep_status_value = last_default_ep_status if default_ep_status_all_same else None
         paused_value = last_paused if paused_all_same else None
         anime_value = last_anime if anime_all_same else None
-        flatten_folders_value = last_flatten_folders if flatten_folders_all_same else None
+        season_folders_value = last_season_folders if season_folders_all_same else None
         quality_value = last_quality if quality_all_same else None
         subtitles_value = last_subtitles if subtitles_all_same else None
         scene_value = last_scene if scene_all_same else None
@@ -3394,12 +3429,12 @@ class Manage(Home, WebRoot):
         root_dir_list = root_dir_list
 
         return t.render(showList=toEdit, showNames=showNames, default_ep_status_value=default_ep_status_value,
-                        paused_value=paused_value, anime_value=anime_value, flatten_folders_value=flatten_folders_value,
+                        paused_value=paused_value, anime_value=anime_value, season_folders_value=season_folders_value,
                         quality_value=quality_value, subtitles_value=subtitles_value, scene_value=scene_value, sports_value=sports_value,
                         air_by_date_value=air_by_date_value, root_dir_list=root_dir_list, title=_('Mass Edit'), header=_('Mass Edit'), topmenu='manage')
 
     def massEditSubmit(self, paused=None, default_ep_status=None,
-                       anime=None, sports=None, scene=None, flatten_folders=None, quality_preset=None,
+                       anime=None, sports=None, scene=None, season_folders=None, quality_preset=None,
                        subtitles=None, air_by_date=None, anyQualities=None, bestQualities=None, toEdit=None, *args_,
                        **kwargs):
         dir_map = {}
@@ -3410,7 +3445,7 @@ class Manage(Home, WebRoot):
         errors = []
         for curShow in showIDs:
             curErrors = []
-            show_obj = Show.find(sickbeard.showList, int(curShow))
+            show_obj = Show.find(sickbeard.showList, int(curShow or 0))
             if not show_obj:
                 continue
 
@@ -3423,53 +3458,14 @@ class Manage(Home, WebRoot):
             else:
                 new_show_dir = show_obj._location  # pylint: disable=protected-access
 
-            if paused == 'keep':
-                new_paused = show_obj.paused
-            else:
-                new_paused = True if paused == 'enable' else False
-            new_paused = 'on' if new_paused else 'off'
-
-            if default_ep_status == 'keep':
-                new_default_ep_status = show_obj.default_ep_status
-            else:
-                new_default_ep_status = default_ep_status
-
-            if anime == 'keep':
-                new_anime = show_obj.anime
-            else:
-                new_anime = True if anime == 'enable' else False
-            new_anime = 'on' if new_anime else 'off'
-
-            if sports == 'keep':
-                new_sports = show_obj.sports
-            else:
-                new_sports = True if sports == 'enable' else False
-            new_sports = 'on' if new_sports else 'off'
-
-            if scene == 'keep':
-                new_scene = show_obj.is_scene
-            else:
-                new_scene = True if scene == 'enable' else False
-            new_scene = 'on' if new_scene else 'off'
-
-            if air_by_date == 'keep':
-                new_air_by_date = show_obj.air_by_date
-            else:
-                new_air_by_date = True if air_by_date == 'enable' else False
-            new_air_by_date = 'on' if new_air_by_date else 'off'
-
-            if flatten_folders == 'keep':
-                new_flatten_folders = show_obj.flatten_folders
-            else:
-                new_flatten_folders = True if flatten_folders == 'enable' else False
-            new_flatten_folders = 'on' if new_flatten_folders else 'off'
-
-            if subtitles == 'keep':
-                new_subtitles = show_obj.subtitles
-            else:
-                new_subtitles = True if subtitles == 'enable' else False
-
-            new_subtitles = 'on' if new_subtitles else 'off'
+            new_paused = ('off', 'on')[(paused == 'enable', show_obj.paused)[paused == 'keep']]
+            new_default_ep_status = (default_ep_status, show_obj.default_ep_status)[default_ep_status == 'keep']
+            new_anime = ('off', 'on')[(anime == 'enable', show_obj.anime)[anime == 'keep']]
+            new_sports = ('off', 'on')[(sports == 'enable', show_obj.sports)[sports == 'keep']]
+            new_scene = ('off', 'on')[(scene == 'enable', show_obj.scene)[scene == 'keep']]
+            new_air_by_date = ('off', 'on')[(air_by_date == 'enable', show_obj.air_by_date)[air_by_date == 'keep']]
+            new_season_folders = ('off', 'on')[(season_folders == 'enable', show_obj.season_folders)[season_folders == 'keep']]
+            new_subtitles = ('off', 'on')[(subtitles == 'enable', show_obj.subtitles)[subtitles == 'keep']]
 
             if quality_preset == 'keep':
                 anyQualities, bestQualities = Quality.splitQuality(show_obj.quality)
@@ -3481,7 +3477,7 @@ class Manage(Home, WebRoot):
             curErrors += self.editShow(curShow, new_show_dir, anyQualities,
                                        bestQualities, exceptions_list,
                                        defaultEpStatus=new_default_ep_status,
-                                       flatten_folders=new_flatten_folders,
+                                       season_folders=new_season_folders,
                                        paused=new_paused, sports=new_sports,
                                        subtitles=new_subtitles, anime=new_anime,
                                        scene=new_scene, air_by_date=new_air_by_date,
@@ -3754,6 +3750,7 @@ class History(WebRoot):
 
         t = PageTemplate(rh=self, filename="history.mako")
         submenu = [
+            {'title': _('Remove Selected'), 'path': 'history/removeHistory', 'icon': 'fa fa-eraser', 'class': 'removehistory', 'confirm': False},
             {'title': _('Clear History'), 'path': 'history/clearHistory', 'icon': 'fa fa-trash', 'class': 'clearhistory', 'confirm': True},
             {'title': _('Trim History'), 'path': 'history/trimHistory', 'icon': 'fa fa-scissors', 'class': 'trimhistory', 'confirm': True},
         ]
@@ -3761,6 +3758,23 @@ class History(WebRoot):
         return t.render(historyResults=data, compactResults=compact, limit=limit,
                         submenu=submenu, title=_('History'), header=_('History'),
                         topmenu="history", controller="history", action="index")
+
+    def removeHistory(self, toRemove=None):
+        logsToRemove = []
+        for logItem in toRemove.split('|'):
+            info = logItem.split(',')
+            logsToRemove.append({
+                'dates': info[0].split('$'),
+                'show_id': info[1],
+                'season': info[2],
+                'episode': info[3]
+            })
+
+        self.history.remove(logsToRemove)
+
+        ui.notifications.message(_('Selected history entries removed'))
+
+        return self.redirect("/history/")
 
     def clearHistory(self):
         self.history.clear()
@@ -3858,7 +3872,7 @@ class ConfigGeneral(Config):
         sickbeard.ROOT_DIRS = rootDirString
 
     @staticmethod
-    def saveAddShowDefaults(defaultStatus, anyQualities, bestQualities, defaultFlattenFolders, subtitles=False,
+    def saveAddShowDefaults(defaultStatus, anyQualities, bestQualities, defaultSeasonFolders, subtitles=False,
                             anime=False, scene=False, defaultStatusAfter=WANTED):
 
         if anyQualities:
@@ -3877,7 +3891,7 @@ class ConfigGeneral(Config):
         sickbeard.STATUS_DEFAULT_AFTER = int(defaultStatusAfter)
         sickbeard.QUALITY_DEFAULT = int(newQuality)
 
-        sickbeard.FLATTEN_FOLDERS_DEFAULT = config.checkbox_to_value(defaultFlattenFolders)
+        sickbeard.SEASON_FOLDERS_DEFAULT = config.checkbox_to_value(defaultSeasonFolders)
         sickbeard.SUBTITLES_DEFAULT = config.checkbox_to_value(subtitles)
 
         sickbeard.ANIME_DEFAULT = config.checkbox_to_value(anime)
@@ -3894,12 +3908,12 @@ class ConfigGeneral(Config):
             api_key=None, indexer_default=None, timezone_display=None, cpu_preset='NORMAL',
             web_password=None, version_notify=None, enable_https=None, https_cert=None, https_key=None,
             handle_reverse_proxy=None, sort_article=None, auto_update=None, notify_on_update=None,
-            proxy_setting=None, anon_redirect=None, git_path=None, git_remote=None,
+            proxy_setting=None, proxy_indexers=None, anon_redirect=None, git_path=None, git_remote=None,
             calendar_unprotected=None, calendar_icons=None, debug=None, ssl_verify=None, no_restart=None, coming_eps_missed_range=None,
             fuzzy_dating=None, trim_zero=None, date_preset=None, date_preset_na=None, time_preset=None,
             indexer_timeout=None, download_url=None, rootDir=None, theme_name=None, default_page=None, fanart_background=None, fanart_background_opacity=None,
-            sickrage_background=None, sickrage_background_path=None, git_reset=None, git_username=None, git_password=None, display_all_seasons=None,
-            gui_language=None):
+            sickrage_background=None, sickrage_background_path=None, git_reset=None, git_auth_type=0, git_username=None, git_password=None, git_token=None,
+            display_all_seasons=None, gui_language=None):
 
         results = []
 
@@ -3935,10 +3949,13 @@ class ConfigGeneral(Config):
         sickbeard.CPU_PRESET = cpu_preset
         sickbeard.ANON_REDIRECT = anon_redirect
         sickbeard.PROXY_SETTING = proxy_setting
+        sickbeard.PROXY_INDEXERS = config.checkbox_to_value(proxy_indexers)
 
-        git_credentials_changed = sickbeard.GIT_USERNAME, sickbeard.GIT_PASSWORD != git_username, git_password
+        git_credentials_changed = sickbeard.GIT_AUTH_TYPE, sickbeard.GIT_USERNAME, sickbeard.GIT_PASSWORD, sickbeard.GIT_TOKEN != git_auth_type, git_username, git_password, git_token
+        sickbeard.GIT_AUTH_TYPE = int(git_auth_type)
         sickbeard.GIT_USERNAME = git_username
         sickbeard.GIT_PASSWORD = git_password
+        sickbeard.GIT_TOKEN = git_token
 
         if git_credentials_changed:
             # Re-Initializes sickbeard.gh, so a restart isn't necessary
@@ -4954,7 +4971,9 @@ class ConfigNotifications(Config):
             use_email=None, email_notify_onsnatch=None, email_notify_ondownload=None,
             email_notify_onsubtitledownload=None, email_host=None, email_port=25, email_from=None,
             email_tls=None, email_user=None, email_password=None, email_list=None, email_subject=None, email_show_list=None,
-            email_show=None, use_slack=False, slack_notify_snatch=None, slack_notify_download=None, slack_webhook=None):
+            email_show=None, use_slack=False, slack_notify_snatch=None, slack_notify_download=None, slack_webhook=None,
+            use_discord=False, discord_notify_snatch=None, discord_notify_download=None, discord_webhook=None, discord_name=None,
+            discord_avatar_url=None, discord_tts=False):
 
         results = []
 
@@ -5047,6 +5066,14 @@ class ConfigNotifications(Config):
         sickbeard.SLACK_NOTIFY_SNATCH = config.checkbox_to_value(slack_notify_snatch)
         sickbeard.SLACK_NOTIFY_DOWNLOAD = config.checkbox_to_value(slack_notify_download)
         sickbeard.SLACK_WEBHOOK = slack_webhook
+
+        sickbeard.USE_DISCORD = config.checkbox_to_value(use_discord)
+        sickbeard.DISCORD_NOTIFY_SNATCH = config.checkbox_to_value(discord_notify_snatch)
+        sickbeard.DISCORD_NOTIFY_DOWNLOAD = config.checkbox_to_value(discord_notify_download)
+        sickbeard.DISCORD_WEBHOOK = discord_webhook
+        sickbeard.DISCORD_NAME = discord_name
+        sickbeard.DISCORD_AVATAR_URL = discord_avatar_url
+        sickbeard.DISCORD_TTS = discord_tts
 
         sickbeard.USE_BOXCAR2 = config.checkbox_to_value(use_boxcar2)
         sickbeard.BOXCAR2_NOTIFY_ONSNATCH = config.checkbox_to_value(boxcar2_notify_onsnatch)

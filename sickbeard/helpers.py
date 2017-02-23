@@ -158,6 +158,7 @@ def remove_non_release_groups(name):
         r'- \[ www\.torrentday\.com \]$': 'searchre',
         r'^\[ www\.TorrentDay\.com \] - ': 'searchre',
         r'\[NO-RAR\] - \[ www\.torrentday\.com \]$': 'searchre',
+        r'^www\.Torrenting\.com\.-\.': 'searchre'
     }
 
     _name = name
@@ -1746,3 +1747,24 @@ def recursive_listdir(path):
     for directory_path, directory_names, file_names in ek(os.walk, path, topdown=False):
         for filename in file_names:
             yield ek(os.path.join, directory_path, filename)
+
+
+MESSAGE_COUNTER = 0
+
+
+def add_site_message(message, level='danger'):
+    to_add = dict(level=level, message=message)
+
+    for index, existing in sickbeard.SITE_MESSAGES.iteritems():
+        if re.sub(r'\d+', '#', existing['message']) == re.sub(r'\d+', '#', message):
+            sickbeard.SITE_MESSAGES[index] = to_add
+            return
+
+        if message.endswith('Please use \'master\' unless specifically asked') and \
+                existing['message'].endswith('Please use \'master\' unless specifically asked'):
+            sickbeard.SITE_MESSAGES[index] = to_add
+            return
+
+    global MESSAGE_COUNTER
+    MESSAGE_COUNTER += 1
+    sickbeard.SITE_MESSAGES[MESSAGE_COUNTER] = to_add

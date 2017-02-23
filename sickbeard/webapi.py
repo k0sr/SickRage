@@ -586,12 +586,10 @@ def _map_quality(show_quality):
     best_qualities = []
 
     i_quality_id, a_quality_id = Quality.splitQuality(int(show_quality))
-    if i_quality_id:
-        for quality in i_quality_id:
-            any_qualities.append(QUALITY_MAP[quality])
-    if a_quality_id:
-        for quality in a_quality_id:
-            best_qualities.append(QUALITY_MAP[quality])
+    for quality in i_quality_id:
+        any_qualities.append((QUALITY_MAP[quality], "N/A")[quality is None])
+    for quality in a_quality_id:
+        best_qualities.append((QUALITY_MAP[quality], "N/A")[quality is None])
     return any_qualities, best_qualities
 
 
@@ -1521,8 +1519,10 @@ class CMDSickBeardGetDefaults(ApiCall):
         any_qualities, best_qualities = _map_quality(sickbeard.QUALITY_DEFAULT)
 
         data = {"status": statusStrings[sickbeard.STATUS_DEFAULT].lower(),
-                "flatten_folders": int(sickbeard.FLATTEN_FOLDERS_DEFAULT), "initial": any_qualities,
-                "archive": best_qualities, "future_show_paused": int(sickbeard.COMING_EPS_DISPLAY_PAUSED)}
+                "flatten_folders": int(not sickbeard.SEASON_FOLDERS_DEFAULT),
+                "season_folders": int(sickbeard.SEASON_FOLDERS_DEFAULT),
+                "initial": any_qualities, "archive": best_qualities,
+                "future_show_paused": int(sickbeard.COMING_EPS_DISPLAY_PAUSED)}
         return _responds(RESULT_SUCCESS, data)
 
 
@@ -1741,7 +1741,7 @@ class CMDSickBeardSetDefaults(ApiCall):
             "initial": {"desc": "The initial quality of a show"},
             "archive": {"desc": "The archive quality of a show"},
             "future_show_paused": {"desc": "True to list paused shows in the coming episode, False otherwise"},
-            "flatten_folders": {"desc": "Flatten sub-folders within the show directory"},
+            "season_folders": {"desc": "Group episodes in season folders within the show directory"},
             "status": {"desc": "Status of missing episodes"},
         }
     }
@@ -1752,7 +1752,8 @@ class CMDSickBeardSetDefaults(ApiCall):
         self.archive, args = self.check_params(args, kwargs, "archive", [], False, "list", PREFERRED_QUALITY_LIST)
 
         self.future_show_paused, args = self.check_params(args, kwargs, "future_show_paused", None, False, "bool", [])
-        self.flatten_folders, args = self.check_params(args, kwargs, "flatten_folders", None, False, "bool", [])
+        self.season_folders, args = self.check_params(args, kwargs, "flatten_folders", not bool(sickbeard.SEASON_FOLDERS_DEFAULT), False, "bool", [])
+        self.season_folders, args = self.check_params(args, kwargs, "season_folders", self.season_folders, False, "bool", [])
         self.status, args = self.check_params(args, kwargs, "status", None, False, "string",
                                               ["wanted", "skipped", "ignored"])
 
@@ -1788,8 +1789,8 @@ class CMDSickBeardSetDefaults(ApiCall):
                 raise ApiError("Status Prohibited")
             sickbeard.STATUS_DEFAULT = self.status
 
-        if self.flatten_folders is not None:
-            sickbeard.FLATTEN_FOLDERS_DEFAULT = int(self.flatten_folders)
+        if self.season_folders is not None:
+            sickbeard.SEASON_FOLDERS_DEFAULT = int(self.season_folders)
 
         if self.future_show_paused is not None:
             sickbeard.COMING_EPS_DISPLAY_PAUSED = int(self.future_show_paused)
@@ -1880,7 +1881,7 @@ class CMDShow(ApiCall):
         show_dict["paused"] = (0, 1)[show_obj.paused]
         show_dict["subtitles"] = (0, 1)[show_obj.subtitles]
         show_dict["air_by_date"] = (0, 1)[show_obj.air_by_date]
-        show_dict["flatten_folders"] = (0, 1)[show_obj.flatten_folders]
+        show_dict["season_folders"] = (0, 1)[show_obj.season_folders]
         show_dict["sports"] = (0, 1)[show_obj.sports]
         show_dict["anime"] = (0, 1)[show_obj.anime]
         show_dict["airs"] = str(show_obj.airs).replace('am', ' AM').replace('pm', ' PM').replace('  ', ' ')
@@ -1934,7 +1935,7 @@ class CMDShowAddExisting(ApiCall):
             "tvdbid": {"desc": "thetvdb.com unique ID of a show"},
             "initial": {"desc": "The initial quality of the show"},
             "archive": {"desc": "The archive quality of the show"},
-            "flatten_folders": {"desc": "True to flatten the show folder, False otherwise"},
+            "season_folders": {"desc": "True to group episodes in season folders, False otherwise"},
             "subtitles": {"desc": "True to search for subtitles, False otherwise"},
         }
     }
@@ -1946,8 +1947,10 @@ class CMDShowAddExisting(ApiCall):
 
         self.initial, args = self.check_params(args, kwargs, "initial", [], False, "list", ALLOWED_QUALITY_LIST)
         self.archive, args = self.check_params(args, kwargs, "archive", [], False, "list", PREFERRED_QUALITY_LIST)
-        self.flatten_folders, args = self.check_params(args, kwargs, "flatten_folders",
-                                                       bool(sickbeard.FLATTEN_FOLDERS_DEFAULT), False, "bool", [])
+        self.season_folders, args = self.check_params(args, kwargs, "flatten_folders",
+                                                      not bool(sickbeard.SEASON_FOLDERS_DEFAULT), False, "bool", [])
+        self.season_folders, args = self.check_params(args, kwargs, "season_folders",
+                                                      self.season_folders, False, "bool", [])
         self.subtitles, args = self.check_params(args, kwargs, "subtitles", int(sickbeard.USE_SUBTITLES),
                                                  False, "int", [])
 
@@ -1995,7 +1998,7 @@ class CMDShowAddExisting(ApiCall):
         sickbeard.showQueueScheduler.action.addShow(
             int(indexer), int(self.indexerid), self.location,
             default_status=sickbeard.STATUS_DEFAULT, quality=new_quality,
-            flatten_folders=int(self.flatten_folders), subtitles=self.subtitles,
+            season_folders=int(self.season_folders), subtitles=self.subtitles,
             default_status_after=sickbeard.STATUS_DEFAULT_AFTER
         )
 
@@ -2014,7 +2017,7 @@ class CMDShowAddNew(ApiCall):
             "initial": {"desc": "The initial quality of the show"},
             "location": {"desc": "The path to the folder where the show should be created"},
             "archive": {"desc": "The archive quality of the show"},
-            "flatten_folders": {"desc": "True to flatten the show folder, False otherwise"},
+            "season_folders": {"desc": "True to group episodes in season folders, False otherwise"},
             "status": {"desc": "The status of missing episodes"},
             "lang": {"desc": "The 2-letter language code of the desired show"},
             "subtitles": {"desc": "True to search for subtitles, False otherwise"},
@@ -2033,8 +2036,10 @@ class CMDShowAddNew(ApiCall):
             args, kwargs, "initial", None, False, "list", ALLOWED_QUALITY_LIST)
         self.archive, args = self.check_params(
             args, kwargs, "archive", None, False, "list", PREFERRED_QUALITY_LIST)
-        self.flatten_folders, args = self.check_params(args, kwargs, "flatten_folders",
-                                                       bool(sickbeard.FLATTEN_FOLDERS_DEFAULT), False, "bool", [])
+        self.season_folders, args = self.check_params(args, kwargs, "flatten_folders",
+                                                      not bool(sickbeard.SEASON_FOLDERS_DEFAULT), False, "bool", [])
+        self.season_folders, args = self.check_params(args, kwargs, "season_folders",
+                                                      self.season_folders, False, "bool", [])
         self.status, args = self.check_params(args, kwargs, "status", None, False, "string",
                                               ["wanted", "skipped", "ignored"])
         self.lang, args = self.check_params(args, kwargs, "lang", sickbeard.INDEXER_DEFAULT_LANGUAGE, False, "string",
@@ -2149,7 +2154,7 @@ class CMDShowAddNew(ApiCall):
 
         sickbeard.showQueueScheduler.action.addShow(
             int(indexer), int(self.indexerid), show_path, default_status=new_status,
-            quality=new_quality, flatten_folders=int(self.flatten_folders),
+            quality=new_quality, season_folders=int(self.season_folders),
             lang=self.lang, subtitles=self.subtitles, anime=self.anime,
             scene=self.scene, default_status_after=default_ep_status_after
         )
@@ -2261,18 +2266,20 @@ class CMDShowGetPoster(ApiCall):
         },
         "optionalParameters": {
             "tvdbid": {"desc": "thetvdb.com unique ID of a show"},
+            "media_format": {"desc": '"normal" for normal size poster (default), "thumb" for small size poster'},
         }
     }
 
     def __init__(self, args, kwargs):
         super(CMDShowGetPoster, self).__init__(args, kwargs)
         self.indexerid, args = self.check_params(args, kwargs, "indexerid", None, True, "int", [])
+        self.media_format, args = self.check_params(args, kwargs, "media_format", "normal", False, "string", ["normal", "thumb"])
 
     def run(self):
         """ Get the poster a show """
         return {
             'outputType': 'image',
-            'image': ShowPoster(self.indexerid),
+            'image': ShowPoster(self.indexerid, self.media_format),
         }
 
 
@@ -2285,18 +2292,20 @@ class CMDShowGetBanner(ApiCall):
         },
         "optionalParameters": {
             "tvdbid": {"desc": "thetvdb.com unique ID of a show"},
+            "media_format": {"desc": '"normal" for normal size banner (default), "thumb" for small size banner'},
         }
     }
 
     def __init__(self, args, kwargs):
         super(CMDShowGetBanner, self).__init__(args, kwargs)
         self.indexerid, args = self.check_params(args, kwargs, "indexerid", None, True, "int", [])
+        self.media_format, args = self.check_params(args, kwargs, "media_format", "normal", False, "string", ["normal", "thumb"])
 
     def run(self):
         """ Get the banner of a show """
         return {
             'outputType': 'image',
-            'image': ShowBanner(self.indexerid),
+            'image': ShowBanner(self.indexerid, self.media_format),
         }
 
 
@@ -2627,9 +2636,7 @@ class CMDShowStats(ApiCall):
                 episode_qualities_counts_snatch["total"] += 1
                 # noinspection PyTypeChecker
                 episode_qualities_counts_snatch[int(row["status"])] += 1
-            elif status == 0:  # we don't count NONE = 0 = N/A
-                pass
-            else:
+            elif status > 0:  # we don't count NONE = 0 = N/A
                 episode_status_counts_total[status] += 1
 
         # the outgoing container
