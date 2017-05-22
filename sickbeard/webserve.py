@@ -75,6 +75,7 @@ from sickbeard.scene_numbering import get_scene_numbering, set_scene_numbering, 
 
 from sickbeard.webapi import function_mapper
 from sickbeard.imdbPopular import imdb_popular
+from sickbeard.traktTrending import trakt_trending
 from sickbeard.helpers import get_showname_from_indexer
 from sickbeard.versionChecker import CheckVersion
 
@@ -473,6 +474,13 @@ class WebRoot(WebHandler):
 
         return self.redirect("/schedule/")
 
+
+    def toggleScheduleDisplaySnatched(self):
+
+        sickbeard.COMING_EPS_DISPLAY_SNATCHED = not sickbeard.COMING_EPS_DISPLAY_SNATCHED
+
+        return self.redirect("/schedule/")
+
     def setScheduleSort(self, sort):
         if sort not in ('date', 'network', 'show') or sickbeard.COMING_EPS_LAYOUT == 'calendar':
             sort = 'date'
@@ -500,7 +508,7 @@ class WebRoot(WebHandler):
 
 
 class CalendarHandler(BaseHandler):
-    def get(self):
+    def get(self, *args, **kwargs):
         if sickbeard.CALENDAR_UNPROTECTED:
             self.write(self.calendar())
         else:
@@ -624,14 +632,15 @@ class UI(WebRoot):
 
         return json.dumps(messages)
 
-    def set_site_message(self, message, level):
+    def set_site_message(self, message, tag, level):
         self.set_header('Cache-Control', 'max-age=0,no-cache,no-store')
         if message:
-            helpers.add_site_message(message, level)
+            helpers.add_site_message(message, tag=tag, level=level)
         else:
             if sickbeard.BRANCH and sickbeard.BRANCH != 'master' and not sickbeard.DEVELOPER and self.get_current_user():
-                message = _('You\'re using the {branch} branch. Please use \'master\' unless specifically asked').format(branch=sickbeard.BRANCH)
-                helpers.add_site_message(message, 'danger')
+                message = _('You\'re using the {branch} branch. '
+                            'Please use \'master\' unless specifically asked').format(branch=sickbeard.BRANCH)
+                helpers.add_site_message(message, tag='not_using_master_branch', level='danger')
 
         return sickbeard.SITE_MESSAGES
 
@@ -2224,8 +2233,8 @@ class Home(WebRoot):
 
         try:
             new_subtitles = ep_obj.download_subtitles(force_lang=lang)
-        except Exception as ex:
-            return json.dumps({'result': 'failure', 'errorMessage': ex.message})
+        except Exception as error:
+            return json.dumps({'result': 'failure', 'errorMessage': error.message})
 
         if new_subtitles:
             new_languages = [subtitle_module.name_from_code(code) for code in new_subtitles]
@@ -2669,8 +2678,7 @@ class HomeAddShows(Home):
 
     def getTrendingShows(self, traktList=None):
         """
-        Display the new show page which collects a tvdb id, folder, and extra options and
-        posts them to addNewShow
+        Display the new show page which collects a tvdb id, folder, and extra options and posts them to addNewShow
         """
         t = PageTemplate(rh=self, filename="trendingShows.mako")
         if not traktList:
@@ -2700,60 +2708,20 @@ class HomeAddShows(Home):
             page_url = "shows/anticipated"
 
         trending_shows = []
-
-        trakt_api = TraktAPI(sickbeard.SSL_VERIFY, sickbeard.TRAKT_TIMEOUT)
-
+        black_list = False
         try:
-            not_liked_show = ""
-            if sickbeard.TRAKT_ACCESS_TOKEN != '':
-                library_shows = trakt_api.traktRequest("sync/collection/shows?extended=full") or []
-                if sickbeard.TRAKT_BLACKLIST_NAME:
-                    not_liked_show = trakt_api.traktRequest("users/" + sickbeard.TRAKT_USERNAME + "/lists/" + sickbeard.TRAKT_BLACKLIST_NAME + "/items") or []
-                else:
-                    logger.log("Trakt blacklist name is empty", logger.DEBUG)
+            trending_shows, black_list = trakt_trending.fetch_trending_shows(traktList, page_url)
+        except Exception as e:
+            logger.log("Could not get trending shows: {0}".format(ex(e)), logger.WARNING)
 
-            if traktList not in ["recommended", "newshow", "newseason"]:
-                limit_show = "?limit=" + str(100 + len(not_liked_show)) + "&"
-            else:
-                limit_show = "?"
+        return t.render(black_list=black_list, trending_shows=trending_shows)
 
-            shows = trakt_api.traktRequest(page_url + limit_show + "extended=full,images") or []
-
-            if sickbeard.TRAKT_ACCESS_TOKEN != '':
-                library_shows = trakt_api.traktRequest("sync/collection/shows?extended=full") or []
-
-            for show in shows:
-                try:
-                    if 'show' not in show:
-                        show['show'] = show
-
-                    if not Show.find(sickbeard.showList, [int(show['show']['ids']['tvdb'])]):
-                        if sickbeard.TRAKT_ACCESS_TOKEN != '':
-                            if show['show']['ids']['tvdb'] not in (lshow['show']['ids']['tvdb'] for lshow in library_shows):
-                                if not_liked_show:
-                                    if show['show']['ids']['tvdb'] not in (show['show']['ids']['tvdb'] for show in not_liked_show if show['type'] == 'show'):
-                                        trending_shows += [show]
-                                else:
-                                    trending_shows += [show]
-                        else:
-                            if not_liked_show:
-                                if show['show']['ids']['tvdb'] not in (show['show']['ids']['tvdb'] for show in not_liked_show if show['type'] == 'show'):
-                                    trending_shows += [show]
-                            else:
-                                trending_shows += [show]
-
-                except MultipleShowObjectsException:
-                    continue
-
-            if sickbeard.TRAKT_BLACKLIST_NAME != '':
-                blacklist = True
-            else:
-                blacklist = False
-
-        except traktException as e:
-            logger.log("Could not connect to Trakt service: {0}".format(ex(e)), logger.WARNING)
-
-        return t.render(blacklist=blacklist, trending_shows=trending_shows)
+    def getTrendingShowImage(self, indexerId):
+        image_url = trakt_trending.get_image_url(indexerId)
+        if image_url:
+            image_path = trakt_trending.get_image_path(trakt_trending.get_image_name(indexerId))
+            trakt_trending.cache_image(image_url, image_path)
+            return indexerId
 
     def popularShows(self):
         """
@@ -2765,7 +2733,7 @@ class HomeAddShows(Home):
         try:
             popular_shows = imdb_popular.fetch_popular_shows()
         except Exception as e:
-            # print(traceback.format_exc())
+            logger.log("Could not get popular shows: {0}".format(ex(e)), logger.WARNING)
             popular_shows = None
 
         return t.render(title=_("Popular Shows"), header=_("Popular Shows"),
@@ -2871,6 +2839,10 @@ class HomeAddShows(Home):
 
         show_name = get_showname_from_indexer(1, indexer_id)
         show_dir = None
+
+        if not show_name:
+            ui.notifications.error(_('Unable to add show'))
+            return self.redirect('/home/')
 
         # add the show
         sickbeard.showQueueScheduler.action.add_show(
@@ -3971,17 +3943,17 @@ class ConfigGeneral(Config):
             indexer_timeout=None, download_url=None, rootDir=None, theme_name=None, default_page=None, fanart_background=None, fanart_background_opacity=None,
             sickrage_background=None, sickrage_background_path=None, custom_css=None, custom_css_path=None,
             git_reset=None, git_auth_type=0, git_username=None, git_password=None, git_token=None,
-            display_all_seasons=None, gui_language=None):
+            display_all_seasons=None, gui_language=None, ignore_broken_symlinks=None):
 
         results = []
 
         if gui_language != sickbeard.GUI_LANG:
             if gui_language:
                 # Selected language
-                gettext.translation('messages', sickbeard.LOCALE_DIR, languages=[gui_language], codeset='UTF-8').install(unicode=1)
+                gettext.translation('messages', sickbeard.LOCALE_DIR, languages=[gui_language], codeset='UTF-8').install(unicode=1, names=["ngettext"])
             else:
                 # System default language
-                gettext.install('messages', sickbeard.LOCALE_DIR, unicode=1, codeset='UTF-8')
+                gettext.install('messages', sickbeard.LOCALE_DIR, unicode=1, codeset='UTF-8', names=["ngettext"])
 
             sickbeard.GUI_LANG = gui_language
 
@@ -4001,6 +3973,7 @@ class ConfigGeneral(Config):
 
         sickbeard.TRASH_REMOVE_SHOW = config.checkbox_to_value(trash_remove_show)
         sickbeard.TRASH_ROTATE_LOGS = config.checkbox_to_value(trash_rotate_logs)
+        sickbeard.IGNORE_BROKEN_SYMLINKS = config.checkbox_to_value(ignore_broken_symlinks)
         config.change_update_frequency(update_frequency)
         sickbeard.LAUNCH_BROWSER = config.checkbox_to_value(launch_browser)
         sickbeard.SORT_ARTICLE = config.checkbox_to_value(sort_article)
